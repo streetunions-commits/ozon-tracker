@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🌐 OZON PRODUCT TRACKER - ФИНАЛЬНАЯ ВЕРСИЯ
-Работает с любым форматом Ozon API
+🌐 OZON PRODUCT TRACKER - ПРАВИЛЬНАЯ РАБОТА С API
+Получает товары из items, затем запрашивает информацию для каждого
 """
 
 import http.server
@@ -28,6 +28,38 @@ class Database:
         self.last_error = None
         self.sync_from_ozon()
     
+    def get_product_info(self, product_id):
+        """Получает информацию о товаре"""
+        try:
+            url = f"{OZON_CONFIG['api_url']}/v3/product/info"
+            
+            headers = {
+                'Client-Id': OZON_CONFIG['client_id'],
+                'Api-Key': OZON_CONFIG['api_key'],
+                'Content-Type': 'application/json'
+            }
+            
+            data = json.dumps({
+                'product_id': product_id
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                if 'result' in result:
+                    info = result['result']
+                    return {
+                        'name': info.get('name') or 'Unknown',
+                        'price': info.get('marketing_price') or info.get('price') or 0,
+                        'rating': info.get('rating') or 0
+                    }
+        except:
+            pass
+        
+        return {'name': 'Unknown', 'price': 0, 'rating': 0}
+    
     def get_fbo_stocks(self, product_id):
         """Получает FBO остатки для товара"""
         try:
@@ -51,17 +83,20 @@ class Database:
                 if 'result' in result and 'stocks' in result['result']:
                     stocks = result['result']['stocks']
                     fbo_stock = 0
+                    fbs_stock = 0
                     
                     for stock in stocks:
-                        if stock.get('type') == 'fbo':
+                        stock_type = stock.get('type', '')
+                        if stock_type == 'fbo':
                             fbo_stock = stock.get('present', 0)
-                            break
+                        elif stock_type == 'fbs':
+                            fbs_stock = stock.get('present', 0)
                     
-                    return fbo_stock
+                    return fbo_stock, fbs_stock
         except:
             pass
         
-        return 0
+        return 0, 0
     
     def sync_from_ozon(self):
         try:
@@ -93,72 +128,52 @@ class Database:
             
             with urllib.request.urlopen(req, timeout=15) as response:
                 response_body = response.read().decode('utf-8')
+                result = json.loads(response_body)
                 
                 print(f"📥 Получен ответ ({len(response_body)} байт)")
                 
-                result = json.loads(response_body)
+                # ✅ Достаём товары из result.items
+                items_list = []
+                if 'result' in result and isinstance(result['result'], dict):
+                    if 'items' in result['result']:
+                        items_list = result['result']['items']
                 
-                print(f"📊 Обработка ответа...")
-                print(f"📝 Структура ответа: {list(result.keys())}")
+                if not items_list:
+                    raise Exception("Не найдены товары в result.items")
                 
-                products_list = []
-                
-                # ✅ ПОПЫТКА 1: result.result.products
-                if 'result' in result:
-                    if isinstance(result['result'], dict):
-                        if 'products' in result['result']:
-                            products_list = result['result']['products']
-                            print(f"✓ Найдено в result.result.products")
-                        else:
-                            # ✅ ПОПЫТКА 2: Поиск в других полях result
-                            print(f"📝 Поля в result: {list(result['result'].keys())}")
-                            for key in result['result']:
-                                if isinstance(result['result'][key], list) and len(result['result'][key]) > 0:
-                                    if isinstance(result['result'][key][0], dict):
-                                        products_list = result['result'][key]
-                                        print(f"✓ Найдено в result.{key}")
-                                        break
-                    elif isinstance(result['result'], list):
-                        products_list = result['result']
-                        print(f"✓ Найдено в result (список)")
-                
-                # ✅ ПОПЫТКА 3: result.products
-                if not products_list and 'products' in result:
-                    if isinstance(result['products'], list):
-                        products_list = result['products']
-                        print(f"✓ Найдено в result.products")
-                
-                # ✅ ПОПЫТКА 4: Сам result список
-                if not products_list and isinstance(result, list):
-                    products_list = result
-                    print(f"✓ Найдено в корне (список)")
-                
-                if not products_list:
-                    raise Exception("Не найдены товары ни в одной из ожидаемых структур")
-                
-                print(f"✓ Найдено товаров: {len(products_list)}")
-                print(f"📦 Получаю FBO остатки...")
+                total = result['result'].get('total', len(items_list))
+                print(f"✓ Найдено товаров: {len(items_list)} из {total}")
+                print(f"📦 Запрашиваю информацию о каждом товаре...\n")
                 
                 self.products = []
-                for i, p in enumerate(products_list):
+                for i, item in enumerate(items_list):
                     try:
-                        product_id = p.get('product_id') or p.get('id') or p.get('sku')
-                        fbo_stock = self.get_fbo_stocks(product_id) if product_id else 0
+                        product_id = item.get('product_id')
+                        offer_id = item.get('offer_id')
+                        
+                        print(f"  [{i+1}/{len(items_list)}] Товар ID {product_id}...", end=' ')
+                        
+                        # Получаем информацию о товаре
+                        info = self.get_product_info(product_id)
+                        
+                        # Получаем остатки
+                        fbo_stock, fbs_stock = self.get_fbo_stocks(product_id)
                         
                         product = {
-                            'id': product_id or i,
-                            'sku': p.get('sku') or p.get('offer_id') or 'N/A',
-                            'name': p.get('name') or p.get('title') or 'Unknown',
-                            'price': p.get('price') or p.get('current_price') or 0,
-                            'stock': p.get('stock') or p.get('stocks') or p.get('quantity') or 0,
+                            'id': product_id,
+                            'sku': offer_id or 'N/A',
+                            'name': info['name'],
+                            'price': info['price'],
+                            'stock': fbs_stock,  # FBS = собственные остатки
                             'fbo_stock': fbo_stock,
-                            'status': p.get('status') or 'active',
-                            'rating': p.get('rating') or p.get('rating_value') or 0
+                            'status': 'active' if not item.get('archived') else 'archived',
+                            'rating': info['rating']
                         }
                         self.products.append(product)
-                        print(f"  ✓ Товар {i+1}: {product['name'][:30]}...")
+                        print(f"✓ {product['name'][:25]}... FBO: {fbo_stock} FBS: {fbs_stock}")
+                    
                     except Exception as e:
-                        print(f"⚠️ Ошибка товара {i}: {e}")
+                        print(f"❌ Ошибка")
                 
                 print(f"\n✓ УСПЕШНО! Загружено {len(self.products)} товаров")
                 
@@ -333,7 +348,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     <div class="container">
         <div class="header">
             <h1>🎉 Ozon Product Tracker</h1>
-            <p>Управление товарами с реальными FBO остатками</p>
+            <p>Управление товарами с FBO и FBS остатками</p>
             <div class="status">{status_icon} {db.connection_status}</div>
         </div>
 
@@ -493,7 +508,7 @@ if __name__ == '__main__':
     
     try:
         print("\n" + "="*80)
-        print("🌐 OZON PRODUCT TRACKER - ФИНАЛЬНАЯ ВЕРСИЯ")
+        print("🌐 OZON PRODUCT TRACKER - РАБОТАЕТ С ПРАВИЛЬНОЙ СТРУКТУРОЙ API")
         print("="*80)
         print(f"\n✓ Сервер запущен на http://localhost:{port}")
         print(f"\n🛑 Для остановки: Ctrl+C\n")
