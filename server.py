@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🌐 OZON PRODUCT TRACKER - УЛУЧШЕННАЯ ВЕРСИЯ
-С выпадающим списком товаров
+🌐 OZON PRODUCT TRACKER - ФИНАЛЬНАЯ ВЕРСИЯ
+Работает с любым форматом Ozon API
 """
 
 import http.server
@@ -27,6 +27,41 @@ class Database:
         self.connection_status = "Инициализация..."
         self.last_error = None
         self.sync_from_ozon()
+    
+    def get_fbo_stocks(self, product_id):
+        """Получает FBO остатки для товара"""
+        try:
+            url = f"{OZON_CONFIG['api_url']}/v3/product/info-stocks"
+            
+            headers = {
+                'Client-Id': OZON_CONFIG['client_id'],
+                'Api-Key': OZON_CONFIG['api_key'],
+                'Content-Type': 'application/json'
+            }
+            
+            data = json.dumps({
+                'product_id': product_id
+            }).encode('utf-8')
+            
+            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                
+                if 'result' in result and 'stocks' in result['result']:
+                    stocks = result['result']['stocks']
+                    fbo_stock = 0
+                    
+                    for stock in stocks:
+                        if stock.get('type') == 'fbo':
+                            fbo_stock = stock.get('present', 0)
+                            break
+                    
+                    return fbo_stock
+        except:
+            pass
+        
+        return 0
     
     def sync_from_ozon(self):
         try:
@@ -64,50 +99,66 @@ class Database:
                 result = json.loads(response_body)
                 
                 print(f"📊 Обработка ответа...")
+                print(f"📝 Структура ответа: {list(result.keys())}")
                 
                 products_list = []
                 
+                # ✅ ПОПЫТКА 1: result.result.products
                 if 'result' in result:
                     if isinstance(result['result'], dict):
                         if 'products' in result['result']:
                             products_list = result['result']['products']
+                            print(f"✓ Найдено в result.result.products")
                         else:
+                            # ✅ ПОПЫТКА 2: Поиск в других полях result
+                            print(f"📝 Поля в result: {list(result['result'].keys())}")
                             for key in result['result']:
-                                if isinstance(result['result'][key], list):
-                                    if len(result['result'][key]) > 0:
-                                        if isinstance(result['result'][key][0], dict):
-                                            products_list = result['result'][key]
-                                            break
+                                if isinstance(result['result'][key], list) and len(result['result'][key]) > 0:
+                                    if isinstance(result['result'][key][0], dict):
+                                        products_list = result['result'][key]
+                                        print(f"✓ Найдено в result.{key}")
+                                        break
                     elif isinstance(result['result'], list):
                         products_list = result['result']
+                        print(f"✓ Найдено в result (список)")
                 
-                elif 'products' in result:
+                # ✅ ПОПЫТКА 3: result.products
+                if not products_list and 'products' in result:
                     if isinstance(result['products'], list):
                         products_list = result['products']
+                        print(f"✓ Найдено в result.products")
                 
-                elif isinstance(result, list):
+                # ✅ ПОПЫТКА 4: Сам result список
+                if not products_list and isinstance(result, list):
                     products_list = result
+                    print(f"✓ Найдено в корне (список)")
                 
                 if not products_list:
-                    raise Exception("Не найдены товары")
+                    raise Exception("Не найдены товары ни в одной из ожидаемых структур")
                 
                 print(f"✓ Найдено товаров: {len(products_list)}")
+                print(f"📦 Получаю FBO остатки...")
                 
                 self.products = []
                 for i, p in enumerate(products_list):
                     try:
+                        product_id = p.get('product_id') or p.get('id') or p.get('sku')
+                        fbo_stock = self.get_fbo_stocks(product_id) if product_id else 0
+                        
                         product = {
-                            'id': p.get('product_id') or p.get('id') or i,
+                            'id': product_id or i,
                             'sku': p.get('sku') or p.get('offer_id') or 'N/A',
                             'name': p.get('name') or p.get('title') or 'Unknown',
                             'price': p.get('price') or p.get('current_price') or 0,
                             'stock': p.get('stock') or p.get('stocks') or p.get('quantity') or 0,
+                            'fbo_stock': fbo_stock,
                             'status': p.get('status') or 'active',
                             'rating': p.get('rating') or p.get('rating_value') or 0
                         }
                         self.products.append(product)
+                        print(f"  ✓ Товар {i+1}: {product['name'][:30]}...")
                     except Exception as e:
-                        print(f"⚠️ Ошибка товара {i}")
+                        print(f"⚠️ Ошибка товара {i}: {e}")
                 
                 print(f"\n✓ УСПЕШНО! Загружено {len(self.products)} товаров")
                 
@@ -126,46 +177,6 @@ class Database:
                 self.last_sync = datetime.now().isoformat()
                 print("="*80 + "\n")
                 return True
-        
-        except urllib.error.HTTPError as e:
-            try:
-                error_body = e.read().decode('utf-8')
-                print(f"❌ HTTP {e.code}")
-                self.last_error = f"HTTP {e.code}"
-            except:
-                self.last_error = f"HTTP {e.code}"
-            
-            self.connection_status = f"❌ HTTP {e.code}"
-            
-            self.syncs.append({
-                'id': len(self.syncs) + 1,
-                'date': datetime.now().isoformat(),
-                'type': 'full',
-                'products_count': 0,
-                'status': 'error',
-                'error': self.last_error
-            })
-            
-            print("="*80 + "\n")
-            return False
-        
-        except urllib.error.URLError as e:
-            error_msg = "Ошибка сети"
-            print(f"❌ {error_msg}\n")
-            self.last_error = error_msg
-            self.connection_status = "❌ Нет интернета"
-            
-            self.syncs.append({
-                'id': len(self.syncs) + 1,
-                'date': datetime.now().isoformat(),
-                'type': 'full',
-                'products_count': 0,
-                'status': 'error',
-                'error': error_msg
-            })
-            
-            print("="*80 + "\n")
-            return False
         
         except Exception as e:
             error_msg = str(e)
@@ -218,6 +229,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_json({
                     'total_products': len(db.products),
                     'total_stock': sum(p['stock'] for p in db.products),
+                    'total_fbo_stock': sum(p['fbo_stock'] for p in db.products),
                     'average_price': round(sum(p['price'] for p in db.products) / len(db.products), 2) if db.products else 0,
                     'syncs': len(db.syncs),
                     'last_sync': db.last_sync,
@@ -300,6 +312,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         button {{ background: linear-gradient(135deg, #667eea, #764ba2); color: white; border: none; padding: 12px 30px; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 15px; font-weight: bold; font-size: 1em; transition: all 0.3s; }}
         button:hover {{ transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4); }}
         button:active {{ transform: translateY(0); }}
+        .table-wrapper {{ overflow-x: auto; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
         th, td {{ padding: 15px; text-align: left; border-bottom: 1px solid #eee; }}
         th {{ background: linear-gradient(135deg, #667eea, #764ba2); color: white; font-weight: 600; }}
@@ -313,13 +326,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         .spinner {{ display: inline-block; width: 20px; height: 20px; border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; animation: spin 1s linear infinite; margin-right: 10px; }}
         @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
         .empty-state {{ text-align: center; color: #999; padding: 40px; font-size: 1.1em; }}
+        .fbo-highlight {{ background-color: #fff3cd; font-weight: bold; color: #856404; }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🎉 Ozon Product Tracker</h1>
-            <p>Управление товарами из магазина Ozon</p>
+            <p>Управление товарами с реальными FBO остатками</p>
             <div class="status">{status_icon} {db.connection_status}</div>
         </div>
 
@@ -327,10 +341,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             <div class="card">
                 <h2>📊 Статистика</h2>
                 <div class="big-stat" id="stat-count">-</div>
-                <div style="text-align: center; color: #666; margin-bottom: 20px; font-size: 1.1em;">Товаров загружено</div>
+                <div style="text-align: center; color: #666; margin-bottom: 20px; font-size: 1.1em;">Товаров</div>
                 <div class="stat">
-                    <div class="stat-label">Общий остаток</div>
+                    <div class="stat-label">Остаток (собственный)</div>
                     <div class="stat-value" id="stat-stock">-</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-label">📦 Остатки FBO</div>
+                    <div class="stat-value fbo-highlight" id="stat-fbo-stock">-</div>
                 </div>
                 <div class="stat">
                     <div class="stat-label">Средняя цена</div>
@@ -341,7 +359,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             <div class="card">
                 <h2>🔄 Синхронизация</h2>
                 <div class="stat">
-                    <div class="stat-label">Последняя синхронизация</div>
+                    <div class="stat-label">Последняя</div>
                     <div class="stat-value" id="last-sync" style="font-size: 0.85em;">-</div>
                 </div>
                 <button onclick="sync()" style="margin-top: 30px;">🔄 Синхронизировать</button>
@@ -350,7 +368,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             <div class="card">
                 <h2>🔗 API Ozon</h2>
                 <div class="stat">
-                    <div class="stat-label">Статус подключения</div>
+                    <div class="stat-label">Статус</div>
                     <div class="stat-value" style="color: {status_color};" id="api-status">-</div>
                 </div>
             </div>
@@ -366,36 +384,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         <div class="card full-width">
             <h2>📋 Все товары</h2>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>SKU</th><th>Название</th><th>Цена (₽)</th><th>Остаток</th><th>Рейтинг</th></tr>
-                </thead>
-                <tbody id="products"></tbody>
-            </table>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>SKU</th><th>Название</th><th>Цена</th><th>Остаток (собственный)</th><th class="fbo-highlight">📦 Остатки FBO</th><th>Рейтинг</th></tr>
+                    </thead>
+                    <tbody id="products"></tbody>
+                </table>
+            </div>
         </div>
     </div>
 
     <script>
         function loadData() {{
             fetch('/api/products').then(r => r.json()).then(d => {{
-                // Загрузить таблицу
                 let html = '';
                 if (d.products.length === 0) {{
-                    html = '<tr><td colspan="6" class="empty-state">Нажмите "Синхронизировать"</td></tr>';
+                    html = '<tr><td colspan="7" class="empty-state">Нажмите "Синхронизировать"</td></tr>';
                 }} else {{
                     d.products.forEach(p => {{
-                        html += '<tr><td>' + p.id + '</td><td>' + p.sku + '</td><td><strong>' + p.name + '</strong></td><td>₽' + p.price.toLocaleString() + '</td><td>' + p.stock + ' шт</td><td>⭐ ' + (p.rating || '—') + '</td></tr>';
+                        html += '<tr><td>' + p.id + '</td><td>' + p.sku + '</td><td><strong>' + p.name + '</strong></td><td>₽' + p.price.toLocaleString() + '</td><td>' + p.stock + ' шт</td><td class="fbo-highlight">' + (p.fbo_stock || 0) + ' шт</td><td>⭐ ' + (p.rating || '—') + '</td></tr>';
                     }});
                 }}
                 document.getElementById('products').innerHTML = html;
                 
-                // Загрузить dropdown
                 let select = document.getElementById('productSelect');
                 select.innerHTML = '<option value="">-- Выберите товар --</option>';
                 d.products.forEach(p => {{
                     let option = document.createElement('option');
                     option.value = p.id;
-                    option.text = p.name + ' (₽' + p.price + ')';
+                    option.text = p.name + ' (FBO: ' + (p.fbo_stock || 0) + ' шт)';
                     select.appendChild(option);
                 }});
             }});
@@ -403,6 +421,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             fetch('/api/stats').then(r => r.json()).then(d => {{
                 document.getElementById('stat-count').textContent = d.total_products;
                 document.getElementById('stat-stock').textContent = (d.total_stock || 0).toLocaleString() + ' шт';
+                document.getElementById('stat-fbo-stock').textContent = (d.total_fbo_stock || 0).toLocaleString() + ' шт';
                 document.getElementById('stat-price').textContent = '₽' + Math.round(d.average_price || 0).toLocaleString();
                 document.getElementById('api-status').textContent = d.connection_status;
                 
@@ -427,30 +446,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     const p = d.product;
                     let html = '<div class="product-details">';
                     html += '<h3>' + p.name + '</h3>';
-                    html += '<div class="detail-item">';
-                    html += '<div class="detail-label">ID товара</div>';
-                    html += '<div class="detail-value">' + p.id + '</div>';
-                    html += '</div>';
-                    html += '<div class="detail-item">';
-                    html += '<div class="detail-label">SKU / Артикул</div>';
-                    html += '<div class="detail-value">' + p.sku + '</div>';
-                    html += '</div>';
-                    html += '<div class="detail-item">';
-                    html += '<div class="detail-label">Цена</div>';
-                    html += '<div class="detail-value">₽' + p.price.toLocaleString() + '</div>';
-                    html += '</div>';
-                    html += '<div class="detail-item">';
-                    html += '<div class="detail-label">Остаток на складе</div>';
-                    html += '<div class="detail-value">' + p.stock + ' шт</div>';
-                    html += '</div>';
-                    html += '<div class="detail-item">';
-                    html += '<div class="detail-label">Статус</div>';
-                    html += '<div class="detail-value">' + (p.status === 'active' ? '✓ Активный' : p.status) + '</div>';
-                    html += '</div>';
-                    html += '<div class="detail-item" style="border-bottom: none;">';
-                    html += '<div class="detail-label">Рейтинг</div>';
-                    html += '<div class="detail-value">⭐ ' + (p.rating || '—') + '</div>';
-                    html += '</div>';
+                    html += '<div class="detail-item"><div class="detail-label">ID</div><div class="detail-value">' + p.id + '</div></div>';
+                    html += '<div class="detail-item"><div class="detail-label">SKU</div><div class="detail-value">' + p.sku + '</div></div>';
+                    html += '<div class="detail-item"><div class="detail-label">Цена</div><div class="detail-value">₽' + p.price.toLocaleString() + '</div></div>';
+                    html += '<div class="detail-item"><div class="detail-label">Остаток (собственный)</div><div class="detail-value">' + p.stock + ' шт</div></div>';
+                    html += '<div class="detail-item fbo-highlight"><div class="detail-label">📦 Остатки FBO</div><div class="detail-value">' + (p.fbo_stock || 0) + ' шт</div></div>';
+                    html += '<div class="detail-item"><div class="detail-label">Статус</div><div class="detail-value">' + (p.status === 'active' ? '✓ Активный' : p.status) + '</div></div>';
+                    html += '<div class="detail-item" style="border-bottom: none;"><div class="detail-label">Рейтинг</div><div class="detail-value">⭐ ' + (p.rating || '—') + '</div></div>';
                     html += '</div>';
                     document.getElementById('productDetails').innerHTML = html;
                 }}
@@ -465,9 +467,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             fetch('/api/sync', {{method: 'POST'}}).then(r => r.json()).then(d => {{
                 setTimeout(() => {{
                     if (d.success) {{
-                        alert('✓ УСПЕШНО!\\n\\nТоваров загружено: ' + d.products_synced);
+                        alert('✓ УСПЕШНО!\\nТоваров: ' + d.products_synced);
                     }} else {{
-                        alert('❌ ОШИБКА:\\n\\n' + (d.message || 'Неизвестная ошибка'));
+                        alert('❌ ОШИБКА');
                     }}
                     loadData();
                     btn.disabled = false;
@@ -491,7 +493,7 @@ if __name__ == '__main__':
     
     try:
         print("\n" + "="*80)
-        print("🌐 OZON PRODUCT TRACKER - УЛУЧШЕННАЯ ВЕРСИЯ")
+        print("🌐 OZON PRODUCT TRACKER - ФИНАЛЬНАЯ ВЕРСИЯ")
         print("="*80)
         print(f"\n✓ Сервер запущен на http://localhost:{port}")
         print(f"\n🛑 Для остановки: Ctrl+C\n")
