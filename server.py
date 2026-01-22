@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🌐 OZON PRODUCT TRACKER - ПРАВИЛЬНАЯ РАБОТА С API
-Получает товары из items, затем запрашивает информацию для каждого
+🌐 OZON PRODUCT TRACKER - ПРАВИЛЬНАЯ РЕАЛИЗАЦИЯ
+Использует правильные API endpoints согласно документации
 """
 
 import http.server
@@ -28,76 +28,6 @@ class Database:
         self.last_error = None
         self.sync_from_ozon()
     
-    def get_product_info(self, product_id):
-        """Получает информацию о товаре"""
-        try:
-            url = f"{OZON_CONFIG['api_url']}/v3/product/info"
-            
-            headers = {
-                'Client-Id': OZON_CONFIG['client_id'],
-                'Api-Key': OZON_CONFIG['api_key'],
-                'Content-Type': 'application/json'
-            }
-            
-            data = json.dumps({
-                'product_id': product_id
-            }).encode('utf-8')
-            
-            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
-            
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if 'result' in result:
-                    info = result['result']
-                    return {
-                        'name': info.get('name') or 'Unknown',
-                        'price': info.get('marketing_price') or info.get('price') or 0,
-                        'rating': info.get('rating') or 0
-                    }
-        except:
-            pass
-        
-        return {'name': 'Unknown', 'price': 0, 'rating': 0}
-    
-    def get_fbo_stocks(self, product_id):
-        """Получает FBO остатки для товара"""
-        try:
-            url = f"{OZON_CONFIG['api_url']}/v3/product/info-stocks"
-            
-            headers = {
-                'Client-Id': OZON_CONFIG['client_id'],
-                'Api-Key': OZON_CONFIG['api_key'],
-                'Content-Type': 'application/json'
-            }
-            
-            data = json.dumps({
-                'product_id': product_id
-            }).encode('utf-8')
-            
-            req = urllib.request.Request(url, data=data, headers=headers, method='POST')
-            
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if 'result' in result and 'stocks' in result['result']:
-                    stocks = result['result']['stocks']
-                    fbo_stock = 0
-                    fbs_stock = 0
-                    
-                    for stock in stocks:
-                        stock_type = stock.get('type', '')
-                        if stock_type == 'fbo':
-                            fbo_stock = stock.get('present', 0)
-                        elif stock_type == 'fbs':
-                            fbs_stock = stock.get('present', 0)
-                    
-                    return fbo_stock, fbs_stock
-        except:
-            pass
-        
-        return 0, 0
-    
     def sync_from_ozon(self):
         try:
             print("\n" + "="*80)
@@ -106,9 +36,9 @@ class Database:
             
             self.connection_status = "Подключение..."
             
+            # ШАГ 1: Получаем список товаров через /v3/product/list
+            print(f"\n📍 ШАГ 1: Получаю список товаров...")
             url = f"{OZON_CONFIG['api_url']}/v3/product/list"
-            print(f"\n📍 URL: {url}")
-            print(f"📍 Client ID: {OZON_CONFIG['client_id']}")
             
             headers = {
                 'Client-Id': OZON_CONFIG['client_id'],
@@ -122,58 +52,85 @@ class Database:
                 'offset': 0
             }).encode('utf-8')
             
-            print(f"📤 Отправляю запрос...")
-            
             req = urllib.request.Request(url, data=data, headers=headers, method='POST')
             
             with urllib.request.urlopen(req, timeout=15) as response:
-                response_body = response.read().decode('utf-8')
-                result = json.loads(response_body)
+                result = json.loads(response.read().decode('utf-8'))
                 
-                print(f"📥 Получен ответ ({len(response_body)} байт)")
+                items_list = result.get('result', {}).get('items', [])
+                total = result.get('result', {}).get('total', len(items_list))
                 
-                # ✅ Достаём товары из result.items
-                items_list = []
-                if 'result' in result and isinstance(result['result'], dict):
-                    if 'items' in result['result']:
-                        items_list = result['result']['items']
+                print(f"✓ Найдено {len(items_list)} товаров из {total}")
                 
                 if not items_list:
-                    raise Exception("Не найдены товары в result.items")
+                    raise Exception("Товары не найдены")
                 
-                total = result['result'].get('total', len(items_list))
-                print(f"✓ Найдено товаров: {len(items_list)} из {total}")
-                print(f"📦 Запрашиваю информацию о каждом товаре...\n")
+                # Собираем product_id
+                product_ids = [item['product_id'] for item in items_list]
+                print(f"✓ ID товаров: {product_ids[:5]}..." if len(product_ids) > 5 else f"✓ ID товаров: {product_ids}")
                 
+                # ШАГ 2: Получаем информацию о товарах через /v3/product/info/list
+                print(f"\n📍 ШАГ 2: Получаю информацию о товарах...")
+                url = f"{OZON_CONFIG['api_url']}/v3/product/info/list"
+                
+                data = json.dumps({
+                    'product_id': product_ids[:100]  # Максимум 100 в одном запросе
+                }).encode('utf-8')
+                
+                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    info_result = json.loads(response.read().decode('utf-8'))
+                    products_info = info_result.get('result', {}).get('products', [])
+                    print(f"✓ Получена информация о {len(products_info)} товарах")
+                
+                # ШАГ 3: Получаем остатки через /v2/product/info/stocks-by-warehouse/fbs
+                print(f"\n📍 ШАГ 3: Получаю остатки товаров...")
+                url = f"{OZON_CONFIG['api_url']}/v2/product/info/stocks-by-warehouse/fbs"
+                
+                data = json.dumps({
+                    'product_id': product_ids[:100]
+                }).encode('utf-8')
+                
+                req = urllib.request.Request(url, data=data, headers=headers, method='POST')
+                
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    stocks_result = json.loads(response.read().decode('utf-8'))
+                    products_stocks = stocks_result.get('result', {}).get('products', [])
+                    print(f"✓ Получены остатки для {len(products_stocks)} товаров")
+                
+                # Создаём словарь для быстрого поиска
+                info_dict = {p.get('id'): p for p in products_info}
+                stocks_dict = {p.get('product_id'): p for p in products_stocks}
+                
+                # Объединяем данные
+                print(f"\n📍 ШАГ 4: Объединяю данные...")
                 self.products = []
+                
                 for i, item in enumerate(items_list):
-                    try:
-                        product_id = item.get('product_id')
-                        offer_id = item.get('offer_id')
-                        
-                        print(f"  [{i+1}/{len(items_list)}] Товар ID {product_id}...", end=' ')
-                        
-                        # Получаем информацию о товаре
-                        info = self.get_product_info(product_id)
-                        
-                        # Получаем остатки
-                        fbo_stock, fbs_stock = self.get_fbo_stocks(product_id)
-                        
-                        product = {
-                            'id': product_id,
-                            'sku': offer_id or 'N/A',
-                            'name': info['name'],
-                            'price': info['price'],
-                            'stock': fbs_stock,  # FBS = собственные остатки
-                            'fbo_stock': fbo_stock,
-                            'status': 'active' if not item.get('archived') else 'archived',
-                            'rating': info['rating']
-                        }
-                        self.products.append(product)
-                        print(f"✓ {product['name'][:25]}... FBO: {fbo_stock} FBS: {fbs_stock}")
+                    product_id = item.get('product_id')
+                    offer_id = item.get('offer_id')
                     
-                    except Exception as e:
-                        print(f"❌ Ошибка")
+                    info = info_dict.get(product_id, {})
+                    stocks = stocks_dict.get(product_id, {})
+                    
+                    # Получаем остатки по складам
+                    total_stock_fbs = 0
+                    stocks_list = stocks.get('stocks', [])
+                    for warehouse in stocks_list:
+                        total_stock_fbs += warehouse.get('present', 0)
+                    
+                    product = {
+                        'id': product_id,
+                        'sku': offer_id or 'N/A',
+                        'name': info.get('name', 'Unknown'),
+                        'price': info.get('price', 0),
+                        'stock': total_stock_fbs,  # FBS = собственные остатки
+                        'fbo_stock': info.get('fbo_stocks', {}).get('present', 0) if 'fbo_stocks' in info else 0,
+                        'status': 'active' if not item.get('archived') else 'archived',
+                        'rating': info.get('rating', 0)
+                    }
+                    self.products.append(product)
                 
                 print(f"\n✓ УСПЕШНО! Загружено {len(self.products)} товаров")
                 
@@ -348,7 +305,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     <div class="container">
         <div class="header">
             <h1>🎉 Ozon Product Tracker</h1>
-            <p>Управление товарами с FBO и FBS остатками</p>
+            <p>Управление товарами с FBO остатками</p>
             <div class="status">{status_icon} {db.connection_status}</div>
         </div>
 
@@ -508,7 +465,7 @@ if __name__ == '__main__':
     
     try:
         print("\n" + "="*80)
-        print("🌐 OZON PRODUCT TRACKER - РАБОТАЕТ С ПРАВИЛЬНОЙ СТРУКТУРОЙ API")
+        print("🌐 OZON PRODUCT TRACKER - ПРАВИЛЬНАЯ РЕАЛИЗАЦИЯ")
         print("="*80)
         print(f"\n✓ Сервер запущен на http://localhost:{port}")
         print(f"\n🛑 Для остановки: Ctrl+C\n")
